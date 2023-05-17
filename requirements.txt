@@ -1,0 +1,12 @@
+jupyterlab
+snowflake-sqlalchemy
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+palettable
+tqdm
+natsort
+xlrd
+xlsxwriter

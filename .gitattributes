@@ -1,0 +1,7 @@
+# show Rmd as R in github languages stats
+*.Rmd linguist-detectable=true
+# ignore all html in diffs and github languages stats
+*.html linguist-generated=true
+# ignore specific .py files linked to jupyter notebooks in github languages stats
+notebooks/dgp_pyspark.py linguist-documentation=true
+notebooks/etl_pyspark.py linguist-documentation=true

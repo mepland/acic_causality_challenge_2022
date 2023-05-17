@@ -1,0 +1,441 @@
+
+---
+title: "acic_final_run_public"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+# install packages, no need if already installed on clusters
+install.packages("pbapply")
+install.packages("speedglm")
+```
+
+
+```{r}
+# acic_2022 helper functions
+# This includes functions to use for the main challenge
+
+# load packages
+library(tidyverse) # data ETL
+library(pbapply) # parallel processing with progress bar
+library(parallel) # parallel computing
+library(speedglm)
+library(boot)
+library(SparkR)
+library(sparklyr)
+
+# wrapper to launch task on Databricks
+# task_list is a numeric vector of task numbers, such as 1:3400 for all tasks
+acic_task_launcher <- function(task_list) {
+  env <- get_env()
+  simple_caller <- function(dataset) {
+    env <- get_env()
+    if (env == "local") root <- "~/Projects/Data_Challenge_2022"
+    if (env == "db") root <- "/dbfs/FileStore/acic_2022"
+    acic_task_caller(dataset, overwrite = T, n_boot = 500, root = root, 
+                     cl_boot = F, group_ps = F)
+  }
+  if (env == "local") res_list <- lapply(task_list, simple_caller) # can parallel later
+  if (env == "db") res_list <- spark.lapply(task_list, simple_caller)
+  res_list
+}
+
+# wrapper to launch task on Databricks
+acic_task_caller <- function(dataset, root = "~/Projects/Data_Challenge_2022", version = "ipwdid_v2_updt",
+                             overwrite = FALSE, n_boot = 20, cl_boot = F, refit = F, group_ps = F) {
+  library(tidyverse)
+  library(speedglm)
+  library(boot)
+  
+  set.seed(dataset)
+  # root <- "/FileStore/acic_2022"
+  dataset_str <- stringr::str_pad(dataset, 4, pad = "0")
+  dir.create(file.path(root, "models", version), showWarnings = F)
+  output_file <- file.path(root, "models", version, paste0("att_", dataset_str, ".csv"))
+  
+  if (overwrite || !file.exists(output_file)){
+    dfw <- load_data(dataset, root = root)
+    res <- fit_model_ipwdid(dfw, max_weight = 5, group_ps = group_ps, boot_method = "basic", n_boot = n_boot, cl_boot = cl_boot, refit = refit)
+    res <- res %>% 
+      dplyr::select(-ci_method) %>% 
+      dplyr::mutate(dataset.num = dataset_str) %>% 
+      dplyr::select(dataset.num, variable, level, year, satt, lower90, upper90)
+    write_csv(res, file = output_file)
+  } else {
+    res <- read_csv(output_file)
+  }
+  res
+}
+
+# check whether run on databricks or on local machine
+get_env <- function() {
+  if (Sys.info()['sysname'] == "Darwin") return("local")
+  if (Sys.info()['sysname'] == "Linux") return("db")
+  return(NULL)
+}
+
+# loading data to clusters
+download_data <- function(
+  dataset = 1, 
+  root = "/FileStore/acic_2022",
+  mount_root = "/mnt/acic-causality-challenge-2022"
+) {
+  dataset_str <- stringr::str_pad(dataset, 4, pad = "0")
+  file_list <- c("patient", "patient_year", "practice", "practice_year")
+  tbl_list <- lapply(1:4, function(i) {
+    file <- file_list[i]
+    mount_file <- file.path(mount_root, file, paste0("acic_", file, "_", dataset_str, ".csv"))
+    local_file <- file.path(root, file, paste0("acic_", file, "_", dataset_str, ".csv"))
+    dbfs_local_file <- paste0("/dbfs", local_file)
+    if (!file.exists(dbfs_local_file)) {
+      # download data from mounted drive
+      dbutils.fs.cp(mount_file, local_file)
+    }
+    return(invisible(NULL))
+  })
+}
+
+# data loader
+load_data <- function(
+  dataset = 1, 
+  root = "~/Projects/Data_Challenge_2022/NewData",
+  fix_neg = F,
+  format = c("wide", "long")
+  ){
+  format = match.arg(format)
+  require(tidyverse)
+  env <- get_env()
+  dataset_str <- stringr::str_pad(dataset, 4, pad = "0")
+  file_list <- c("patient", "patient_year", "practice", "practice_year")
+  type_list <- c("ccdiidf", "cid", "cififidddd", "cidiiiddddddd")
+  
+  # find subdir contains the dataset - for raw files downloaded from websites
+  find_subdir <- function(dataset) {
+    subdir_lst <- paste0("track1", c("a", "b", "c"), "_20220404")
+    subdir <- subdir_lst[sapply(subdir_lst, function(d) {
+      file.exists(file.path(root, d, "patient", paste0("acic_patient_", dataset_str, ".csv")))
+    })]
+    subdir
+  }
+  
+  if (env == "local") root <- file.path(root, find_subdir(dataset))
+  tbl_list <- lapply(1:4, function(i) {
+    file <- file_list[i]
+    type <- type_list[i]
+    # mount_file <- file.path(mount_root, file, paste0("acic_", file, "_", dataset_str, ".csv"))
+    local_file <- file.path(root, file, paste0("acic_", file, "_", dataset_str, ".csv"))
+    if (!file.exists(local_file)) {
+      cat("Missing file", dataset_str, "\n")
+      return(invisible(NULL))
+    }
+    read_csv(local_file, col_types = type, show_col_types = FALSE)
+  })
+  patient_year_df <- tbl_list[[2]] %>%
+    left_join(tbl_list[[1]], by = "id.patient") %>%
+    left_join(tbl_list[[3]], by = "id.practice") %>%
+    left_join(tbl_list[[4]] %>% dplyr::select(id.practice, year, Z, post), by = c("year", "id.practice"))
+  colnames(patient_year_df) <- gsub('\\.', '_', colnames(patient_year_df))  
+  
+  if (fix_neg) patient_year_df$Y <- pmax(patient_year_df$Y, 0.01)
+  if (format == "wide") {
+  # change to wide format 
+    patient_year_df <- long_to_wide(patient_year_df)
+  }
+  return(patient_year_df)
+}
+
+### add propensity score weights to a data frame in wide format
+add_ps1 <- function(dfw, z_var = "Z", 
+                   x_vars = c("V1", "V2", "V3", "V4", "V5",
+                              "X1", "X2", "X3", "X4", "X5",
+                              "X6", "X7", "X8", "X9"
+                            ),
+                   group_var = NA,
+                   ps_var = "ps", weight_var = "weights",
+                   method = "ps", estimand = "ATT", max_weight = Inf, ...) {
+  # require(WeightIt)
+  require(speedglm)
+  if (!is.na(group_var) && group_var != "Overall") {
+    fml <- paste(z_var, "~", group_var, "*(", paste(setdiff(x_vars, group_var), collapse = "+"), ")")
+  } else {
+    fml <- paste(z_var, "~", paste(x_vars, collapse = "+"))
+  }
+  
+  m <- tryCatch(
+    {
+      # cat("try speedglm\n")
+      speedglm(as.formula(fml), data = dfw, family=binomial('logit'), fitted = TRUE)
+      
+    },
+    error=function(cond) {
+      return(NA)
+    }
+  )
+  if (is.na(m[1])) {
+    m <- tryCatch(
+      {
+        # cat("try glm\n")
+        stats::glm(as.formula(fml), data = dfw, family=binomial('logit'))
+      },
+      error=function(cond) {
+        return(NA)
+      }
+    )
+  }
+  
+  if (!is.na(m[1])) {
+      ps <- fitted(m)
+      ps <- pmin(ps, 1 - 1e-16)
+      prop <- mean(as.numeric(pull(dfw,z_var)))
+      weights <- pull(dfw,z_var) * 1 + (1-pull(dfw,z_var)) * ps/(1-ps) *(1-prop)/prop 
+      res <- data.frame(ps, pmin(weights, max_weight))
+      colnames(res) <- c(ps_var, weight_var)
+      attr(res, "vcov") <- vcov(m)
+      attr(res, "formula") <- as.formula(fml)
+  } else {
+    cat("Fail to fit glm!", group_var, "\n")
+    # use a existing ps
+    if (weight_var %in% colnames(dfw)) {
+      cat("Use the original data ps\n")
+      # do nothing
+      res <- dfw[,c(ps_var, weight_var)]
+      colnames(res) <- c(ps_var, weight_var)
+    } else if("ps" %in% colnames(dfw)) {
+      cat("Use the overall ps\n")
+      res <- dfw[,c("ps", "weights")]
+      colnames(res) <- c(ps_var, weight_var)
+    } else {
+      stop("No existing ps to use!")
+    }
+  }
+  
+  return(res)
+}
+
+### pivot a wide data frame to long format, keep only one set of Z and Y variables
+wide_to_long <- function(df, z_var = "Z", y_var = "Y") {
+  df %>% pivot_longer(cols = c("year1", "year2", "year3", "year4"),
+                      values_to = y_var,
+                      names_to = "year") %>%
+    mutate(year = as.integer(stringr::str_sub(year, 5, 5))) %>%
+    mutate(Z_year3 = as.numeric(Z == 1 & year == '3')) %>%
+    mutate(Z_year4 = as.numeric(Z == 1 & year == '4')) %>%
+    mutate(G = 3*Z)
+}
+
+### pivot a long data frame to a wide format
+long_to_wide <- function(df, keep_weights = T) {
+  id_cols <- c("id_patient", "id_practice", "Z",
+               "V1", "V2", "V3", "V4", "V5", 
+               "X1", "X2", "X3", "X4", "X5", 
+               "X6", "X7", "X8", "X9")
+  if ("weights" %in% colnames(data) && keep_weights) id_cols <- c(id_cols, "ps", "weights")
+  df %>% 
+    pivot_wider(id_cols = all_of(id_cols), 
+                values_from = c("Y"), 
+                names_from = "year", 
+                names_prefix = "year"
+    )
+}
+
+# fit ipwdid model
+fit_model_ipwdid <- function(dfw, dfl = NULL, 
+                             max_weight = Inf, group_ps = TRUE, 
+                             cl_boot = FALSE, refit = FALSE,
+                             boot_method = c("all", "norm", "basic", "perc"),
+                             n_boot = 20, alpha = 0.1) {
+  require(speedglm)
+  require(boot)
+  
+  sample_boot <- function(dfw, dummy) {
+    n <- nrow(dfw)
+    ids <- base::sample(1:n, replace = T)
+    dfw[ids,]
+  }
+  
+  cluster_boot <- function(dfw, dummy) {
+    n <- nrow(dfw)
+    cluster <- unique(dfw$id_practice)
+    cluster_sample <- base::sample(cluster, replace = T)
+    obs <- split(1:n, dfw$id_practice)
+    obs_sample <- lapply(obs[cluster_sample], function(id) base::sample(id, replace = T))
+    ids <- unlist(obs_sample)
+    dfw[ids,]  
+  }
+  
+  if (cl_boot) {
+    boot_fun <- cluster_boot
+  } else {
+    boot_fun <- sample_boot
+  }
+  
+  variables <- c("Overall", "X1", "X2", "X3", "X4", "X5")
+  psdf <- add_ps1(dfw, max_weight = max_weight)
+  dfw$ps <- psdf$ps
+  dfw$weights <- psdf$weights
+  if (boot_method == "all") {
+    boot_type <- c("norm", "basic", "perc")
+  } else {
+    boot_type <- boot_method
+  }
+  boot <- TRUE
+  if (group_ps) {
+    # create all the ps needed before bootstrapping
+    for (var in setdiff(variables, "Overall")) {
+      psdf <- add_ps1(dfw, z_var = "Z", 
+                    group_var = var,
+                    ps_var = paste0("ps_", var), 
+                    weight_var = paste0("weights_", var),
+                    max_weight = max_weight)
+      dfw[,paste0("ps_", var)] <- psdf[,paste0("ps_", var)]
+      dfw[,paste0("weights_", var)] <- psdf[,paste0("weights_", var)]
+    }
+  }
+  
+  final_res <- data.frame()
+  
+  if (boot) {
+    t_boot_start <- proc.time()
+    res <- lapply(variables, function(var) {
+      level_list <- sort(unique(as.character(dfw[[var]])))
+      if (var == "Overall") level_list <- NA
+      lapply(level_list, function(level) {
+        get_att_level_boot(dfw, var = var, level = level, alpha = alpha, group_ps = group_ps, max_weight = max_weight)
+      }) %>% do.call(rbind, .)
+    }) %>% do.call(rbind, .)
+    
+    res_boot <- boot(
+      # data = dfw, R = n_boot, sim = "parametric", ran.gen = boot_fun, 
+      # statistic = function(boot_df
+      #                      # , boot_ind
+      #                      ) {
+      data = dfw, R = n_boot, sim = "ordinary",
+      statistic = function(boot_df, boot_ind) {
+        boot_df <- boot_df[boot_ind,]
+        res <- lapply(variables, function(var) {
+          if (refit) {
+            # refit pscore, otherwise use the overall score
+            psdf <- add_ps1(boot_df, z_var = "Z", 
+                            group_var = var,
+                            ps_var = paste0("ps_", var), 
+                            weight_var = paste0("weights_", var),
+                            max_weight = max_weight)
+            boot_df[,paste0("ps_", var)] <- psdf[,paste0("ps_", var)]
+            boot_df[,paste0("weights_", var)] <- psdf[,paste0("weights_", var)]  
+          }
+          
+          level_list <- sort(unique(as.character(boot_df[[var]])))
+          if (var == "Overall") level_list <- NA
+          lapply(level_list, function(level) {
+            get_att_level_boot(boot_df, var = var, level = level, alpha = alpha, group_ps = group_ps, max_weight = max_weight)
+          }) %>% do.call(rbind, .)
+        }) %>% do.call(rbind, .)
+        res$satt
+      })
+    
+    res_boot_ci <- lapply(1:length(res_boot$t0), function(i) {
+      ci <- boot.ci(res_boot, conf = 1-alpha, type = boot_type, index = i)
+      r <- data.frame()
+      for (type in boot_type) {
+        pos = c(4, 5)
+        if (type == "norm") {
+          pos <- pos - 2
+          type <- "normal"
+        } 
+        if (type == "perc") {
+          type <- "percent"
+        }
+        r <- rbind(r, 
+                   data.frame(
+                     index = i, 
+                     ci_method = type, 
+                     lower90 = ci[[type]][pos[1]],
+                     upper90 = ci[[type]][pos[2]]
+                   )
+        )
+      }
+      r 
+    }) %>% do.call(rbind, .)
+    
+    res$index <- 1:nrow(res)
+    res <- res %>% left_join(res_boot_ci) %>% dplyr::select(-index)
+    
+    res_boot_bias <- colMeans(res_boot$t) - res_boot$t0
+    res$bias <- res_boot_bias
+    
+    final_res <- rbind(final_res, res)
+    t_boot_end <- proc.time()
+    print(t_boot_end - t_boot_start)
+  } 
+  final_res
+}
+
+get_att_level_boot <- function(dfw, var = c("Overall", "X1", "X2", "X3", "X4", "X5"),
+                          level = NA, alpha = 0.1, group_ps = TRUE, max_weight = Inf) {
+  # var <- "X1"
+  # var <- "Overall"
+  # level <- "0"
+  if (var == "Overall") {
+    df <- dfw
+  } else {
+    df <- dfw %>% filter(!!as.name(var) == level)  
+  }
+  
+  if (group_ps && var != "Overall") {
+    df[["ps"]] <- df[[paste0("ps_", var)]]
+    df[["weights"]] <- df[[paste0("weights_", var)]]
+  }
+  
+  res <- data.frame()
+  if (var == "Overall") {
+    y_list <- c(3, 4, NA)
+  } else {
+    y_list <- c(NA)
+  }
+  
+  res <- lapply(y_list, function(y) {
+    # y = 3
+    if (!is.na(y)) {
+      w.treat0 <- df$Z
+      w.cont0 <- pmin(df$ps * (1 - df$Z)/(1 - df$ps), max_weight)
+      deltaY <- df[[paste0("year", y)]] - df[["year2"]]
+    } else {
+      w.treat0 <- c(df$Z, df$Z)
+      w.cont0 <- pmin(c(df$ps * (1 - df$Z)/(1 - df$ps), df$ps * (1 - df$Z)/(1 - df$ps)), max_weight)
+      deltaY <- c(df[[paste0("year", 3)]] - df[["year2"]], df[[paste0("year", 4)]] - df[["year2"]])
+    }
+    
+    ind <- which(!is.na(deltaY))
+    w.treat <- w.treat0[ind]
+    w.cont <- w.cont0[ind]
+    deltaY <- deltaY[ind]
+    
+    att.treat <- w.treat * deltaY
+    att.cont <- w.cont * deltaY
+    eta.treat <- mean(att.treat) / mean(w.treat)
+    eta.cont <- mean(att.cont) / mean(w.cont)
+    ipw.att <- eta.treat - eta.cont
+    
+    data.frame(variable = var, level = level, year = y, satt = ipw.att
+    )
+  }) %>% do.call(rbind, .)
+  
+  res
+}
+```
+
+
+```{r}
+# launch task
+acic_task_launcher(1)
+```
+
+
+```{r}
+# launch task
+acic_task_launcher(1:3400)
+```
+

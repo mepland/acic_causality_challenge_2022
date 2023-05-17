@@ -1,0 +1,532 @@
+\documentclass[twoside,11pt]{article}
+
+% Any additional packages needed should be included after obs_study_style.
+% Note that obs_study_style.sty includes epsfig, amssymb, natbib (commented out) and graphicx,
+% and defines many common macros, such as 'proof' and 'example'.
+
+\usepackage[nocompress]{cite} % orders references numerically within one \cite{}, see https://tex.stackexchange.com/questions/69230/numbered-ordering-of-multiple-citations Also changes spacing after comma
+\usepackage[square,numbers]{natbib}
+
+\usepackage{obs_study_style}
+\usepackage{hyperref}
+
+\usepackage{xspace} % note that \xspace properly handles the abbreviation period spacing - producing a single regular space, not the end of a sentence spacing
+\usepackage{amsmath,amssymb,bbm,bm} % https://ctan.org/pkg/bm
+\usepackage[separate-uncertainty,multi-part-units=single,free-standing-units,product-units=repeat,use-xspace]{siunitx} % units package, see https://www.ctan.org/pkg/siunitx
+\sisetup{range-phrase={\text{--}},range-units=single}
+
+% Definitions of handy macros can go here
+\newcommand*{\DID}{\ensuremath{\text{DID}}\xspace}
+\newcommand*{\IPW}{\ensuremath{\text{IPW}}\xspace}
+\newcommand*{\IPWDID}{\ensuremath{\text{IPWDID}}\xspace}
+\newcommand*{\ATT}{\ensuremath{\text{ATT}}\xspace}
+\newcommand*{\ATTestIPWDID}{\ensuremath{\hat{\tau}^{\IPWDID}}\xspace}
+\newcommand*{\SATT}{\ensuremath{\text{SATT}}\xspace}
+
+% models
+\newcommand{\modelStyle}[1]{\ensuremath{\textbf{#1}}\xspace}
+\newcommand*{\ipwdid}{\modelStyle{ipwdid\_1}}
+\newcommand*{\ipwdidStar}{\modelStyle{ipwdid\_2*}}
+\newcommand*{\ipwdidP}{\modelStyle{ipwdidp\_1*}}
+\newcommand*{\ipwdidPtwo}{\modelStyle{ipwdidp\_2*}}
+
+\newcommand{\dataset}{{\cal D}}
+\newcommand{\fracpartial}[2]{\frac{\partial #1}{\partial #2}}
+\newcommand{\R}{\textsc{R}\xspace}
+\newcommand*{\ie}{\textit{i.e.}\@\xspace}
+\newcommand*{\eg}{\textit{e.g.}\@\xspace}
+%\newcommand*{\etc}{\textit{etc.}\@\xspace}
+\makeatletter
+\newcommand\etc{\textit{etc}\@ifnextchar.{}{.\@\xspace}}
+\makeatother
+
+% For papers submitted for review, just fill in author names
+% For accepted papers, heading arguments are {volume}{year}{pages}{submitted}{published}{author-full-names}
+\heading{}{}{}{}{}{Yuqin Wei, Matthew Epland and Jingyuan (Hannah) Liu}
+
+% Short headings should be running head and authors last names
+
+\ShortHeadings{\IPWDID}{Wei, Epland, and Liu}
+\firstpageno{1}
+
+% use cref and not ref, have to load last
+\usepackage[capitalise]{cleveref} % https://ctan.org/pkg/cleveref see section 7.1, if redefining need to make them caps
+\crefname{figure}{Figure}{Figures}
+\Crefname{figure}{Figure}{Figures}
+\crefname{tabular}{Table}{Tables}
+\Crefname{tabular}{Table}{Tables}
+\crefname{section}{Section}{Sections}
+\Crefname{section}{Section}{Sections}
+\crefname{chapter}{Chapter}{Chapters}
+\Crefname{chapter}{Chapter}{Chapters}
+\crefname{appchap}{Appendix}{Appendices}
+\Crefname{appchap}{Appendix}{Appendices}
+\crefformat{equation}{(#2#1#3)}
+
+\begin{document}
+
+\title{Inverse Probability Weighting Difference-in-Differences (\IPWDID)}
+
+\author{\name Yuqin Wei \email yuqin.wei@komodohealth.com \\
+% \AND
+\name Matthew Epland, Ph.D.\ \email matthew.epland@komodohealth.com \\
+% \AND
+\name Jingyuan (Hannah) Liu \email hannah.liu@komodohealth.com \\
+\addr Komodo Health \\
+90 5th Avenue, 5th Floor \\
+New York, NY 10011, USA}
+
+\maketitle
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{abstract}% <- trailing '%' for backward compatibility of .sty file
+In this American Causal Inference Conference (ACIC) 2022 challenge submission,
+the canonical difference-in-differences (\DID) estimator
+has been used with inverse probability weighting (\IPW)
+and strong simplifying assumptions
+to produce a benchmark model of the
+sample average treatment effect on the treated (\SATT).
+Despite the restrictive assumptions and simple model,
+satisfactory performance in both point estimate and confidence intervals was observed,
+ranking in the top half of the competition.
+\end{abstract}
+
+\begin{keywords}
+Difference-in-Differences,
+\DID,
+Inverse Probability Weighting,
+\IPW
+\end{keywords}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introduction}
+\label{intro}
+
+The American Causal Inference Conference (ACIC) data challenge
+provides a unique opportunity for practitioners in academia and industry
+to test the latest causal inference techniques on a shared problem and dataset.
+As relative newcomers to the field, we applied
+the canonical difference-in-differences (\DID)
+method with inverse probability weighting (\IPW)
+to gain experience with causal inference problems.
+We hope that the \IPWDID results presented here
+can serve as a benchmark by which novel models proposed in recent years
+can be compared against a well-established model.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Methodology and Motivation}
+\label{method}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Problem and Notation}
+\label{method:notation}
+
+The 2022 ACIC challenge datasets were designed to mirror data from
+a real large-scale intervention in the U.S. healthcare system aimed at lowering Medicare expenditures.
+Let $Y_{i,t}(1)$ and $Y_{i,t}(0)$ denote the potential expenditure outcomes for patient $i$,
+where the patient receives the treatment or control condition, respectively, at time $t$.
+The observed outcome for patient $i$ is given by
+$Y_{i,t} = z_{i} \, p_{t} \, Y_{i,t}(1) + \left(1-z_{i} \, p_{t}\right) Y_{i,t}(0)$,
+where $z_{i}$ indicates membership in the treatment group,
+and $p_{t}$ is an indicator for \emph{post}.
+The average treatment effect on the treated (\ATT) is then defined as:
+
+\begin{equation}\label{eq:ATT}
+\ATT\left(t\right) = E_{i \mid Z_{i}=1} \left(Y_{i,t}(1) - Y_{i,t}(0)\right).
+\end{equation}
+
+Note, in the ACIC challenge the target estimand is the \ATT over the observed units,
+\ie the sample average treatment effect on the treated (\SATT).
+However, we will continue to refer to \ATT for simplicity.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Difference-in-Differences (\DID)}
+\label{method:DID}
+
+Given the longitudinal nature of the data,
+one potential approach is to compare changes between cohorts
+before and after an intervention in a difference-in-differences (\DID) analysis.
+When the difference between the intervention group and control group is
+constant over time in the absence of intervention, known as the parallel trends assumption (PTA),
+the \DID design enables us to estimate causal effects
+even in the presence of time-invariant unmeasured confounding \cite{10.1111/0034-6527.00321}.
+
+A typical \DID model involves two time periods, pre- and post-intervention,
+however the ACIC 2022 challenge includes
+two years of pre-intervention data, $t=1,2$ and
+two years of post-intervention data, $t=3,4$.
+This provides us with a few options for handling the pre-intervention period,
+namely using a two-way fixed effect model
+or limiting the use of pre-intervention data to only one term \cite{egami_yamauchi_2022}.
+
+For a \DID model with multiple pre-intervention time periods,
+testing for pre-intervention differences in trends, \ie a pretest, is suggested,
+either through testing pre-intervention regression coefficients or via a visual inspection.
+However, as shown in \cite{10.1257/aeri.20210236}
+conditioning the analysis on the result of a pretest can distort estimation and inference,
+potentially exacerbating the bias of point estimates and under-coverage of confidence intervals.
+In addition, it is difficult to automate the pretest
+for each of the \num{3400} realizations of the data generation process present in the challenge dataset.
+
+A two-way fixed effect model is commonly used for \DID models in cases with panel data like this one.
+Yet, a two-way fixed effect model may not correctly estimate \ATT when
+there is a strong heterogeneous effect \cite{10.1257/aer.20181169},
+or the effect is not linearly additive \cite{imai_kim_2021}.
+Methods that improve two-way fixed effect regression \cite{egami_yamauchi_2022},
+or improve the estimate when the PTA is violated \cite{Rambachan2019AnHA},
+have been studied in the field of economics.
+However, these methods are not well understood and are infrequently used in applied research.
+
+We decided to address these issues in the challenge dataset
+by limiting the observations to year 2 and beyond,
+thereby assuming the PTA only begins in year 2.
+This simplification is arbitrary, and causes data from year 1 to be dropped completely,
+but should help to reduce the bias from potentially violating the PTA,
+in particular when compared to models assuming the PTA holds over both years 1 and 2.
+In \cref{results:patient_practice} we will show a sensitivity analysis
+using the average cost from years 1 and 2 as the pre-intervention cost
+to estimate the impact of neglecting year 1.
+
+Using the canonical \DID model, the \DID estimator of \ATT for each year $t=3,4$ is then
+
+\begin{equation}\label{eq:DID_ATT_t}
+\hat{\tau}_{t}^{\DID} = \overline{Y}_{1,t} - \overline{Y}_{1,2} - \left(\overline{Y}_{0,t} - \overline{Y}_{0,2}\right),
+\end{equation}
+
+\noindent where
+$Y_{i,t}$ is the observed outcome for patient $i$ in year $t$,
+$\overline{Y}_{z,t} = \frac{1}{n_{z}} \sum_{i \mid Z_{i}=z} Y_{i,t}$ is the estimate for $Y$,
+and $n_{z}$ is the sample size of each cohort.
+In this framework, the PTA can be stated as:
+
+\begin{equation}\label{eq:DID_PTA}
+E\left(Y_{i,t}(0) - Y_{i,2}(0) \mid Z_{i}=1\right) = E\left(Y_{i,t}(0) - Y_{i,2}(0) \mid Z_{i}=0\right).
+\end{equation}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{\IPWDID}
+\label{method:IPWDID}
+
+The PTA may also be implausible if the pre-intervention covariates
+are unbalanced between the intervention and control arms \cite{10.1111/0034-6527.00321}.
+We restate the PTA conditioning on covariates as:
+
+\begin{equation}\label{eq:DID_PTA_COND}
+E\left(Y_{i,t}(0) - Y_{i,2}(0) \mid Z_{i}=1, X_{i}\right) = E\left(Y_{i,t}(0) - Y_{i,2}(0) \mid Z_{i}=0, X_{i}\right).
+\end{equation}
+
+It can be shown that a simple two-step strategy,
+inverse probability weighting (\IPW) \cite{SANTANNA2020101},
+can adjust for the covariate imbalance.
+First, the \IPW is calculated while targeting the \ATT.
+Second, an \IPWDID estimator on the weighted samples is computed.
+Using the same framework as above, we then have
+
+\begin{equation}\label{eq:IPWDID_ATT_t}
+\hat{\tau}_{t}^{\IPWDID} = \frac{1}{n} \sum_{i} \frac{Z_{i} - \hat{\pi}\left(X_{i}\right)}{1 - \hat{\pi}\left(X_{i}\right)} \left(Y_{i,t} - Y_{i,2}\right),
+\end{equation}
+
+\noindent where $\hat{\pi}(X_{i})$ is an estimator of the true propensity score $p(X) = P\left(Z_{i}=1 \mid X_{i}\right)$.
+
+We then construct the final \ATT as a weighted average across years $t=3,4$ as
+
+\begin{equation}\label{eq:IPWDID_ATT}
+\ATTestIPWDID = \frac{n_{3} \, \hat{\tau_{3}}^{\IPWDID} + n_{4} \, \hat{\tau_{4}}^{\IPWDID} }{n_{3}+n_{4}},
+\end{equation}
+
+\noindent where $n_{t}$ is the number of records with non-missing values in year $t$.
+
+For simplicity, we use a logistic regression model over all covariates to estimate the propensity score.
+As the feature definitions are unknown,
+we did not assume any causal relationships or preform feature engineering,
+beyond one-hot encoding the categorical features.
+Lastly, \IPW weights over 5 are truncated to 5
+to avoid extreme weights and improve the stability of the estimate.
+
+\subsubsection{Alternatives}
+\label{method:IPWDID:alternatives}
+
+Here we shall briefly discuss some of the alternatives to the \IPWDID model as described above.
+\DID regression can be used by regressing the outcome variable on all covariates,
+but this requires a strong assumption to be made on the functional form of the outcome model.
+Methods that analyze the response surface directly,
+such as Bayesian additive regression trees (BART) \cite{Hill2011Bayesian},
+may perform better, but are not considered here due to their complexity.
+Doubly robust (DR) estimators have been proposed \cite{SANTANNA2020101,10.2307/27645858,10.1093/aje/kwq439}
+which only require either the propensity score model or the outcome model to be correctly specified in order to obtain an unbiased estimator.
+They are also more complex than \IPWDID, and are likewise not considered.
+Additionally, it has been argued that when both the propensity score model and the outcome model are misspecified,
+there is no evidence that DR estimators perform better than \IPW \cite{10.3389/fphar.2019.00973}.
+
+Finally, propensity score matching (PSM) can be used in parallel with \DID,
+as proposed in \cite{10.1111/0034-6527.00321}.
+PSM aims to reduce the bias due to confounding variables
+by finding matching intervention and control pairs in the data via the propensity score.
+We performed experiments using PSM which constructed
+more balanced intervention and control patient cohorts,
+with promising results for the \DID estimand.
+However, due to the prohibitive computational burden of PSM,
+in particular when working with the patient-level data,
+we selected the \IPWDID approach for the challenge.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Bootstrapping Confidence Intervals}
+\label{method:CI}
+
+Bootstrap sampling with \num{500} repetitions, per realization, is used to quantify
+the \SI{90}{\percent} confidence intervals of the point estimates.
+Patients, or practices, are resampled with replacement to compute
+Hall's Basic confidence interval \cite{10.2307/2241604}.
+
+Two other approaches were also considered,
+robust sandwich estimators and hierarchical bootstrapping.
+Robust sandwich estimators were not selected as they
+tend to be over-conservative when used together with \IPW \cite{10.1002/sim.7084}.
+Hierarchical bootstrapping \cite{davison_hinkley_1997}
+aims to maintain the original hierarchical data structure within each bootstrap resample.
+In this approach, practices are first resampled with replacement,
+and then patients within selected practices are resampled with replacement.
+However, each bootstrap resample may not have an equal sample size.
+
+We tried to implement the hierarchical bootstrapping method in our initial challenge submission,
+but the resulting confidence intervals were questionable.
+We suspect this could be due to an implementation error,
+though have yet to fully explain what went wrong.
+Instead, due to limited time we switched to
+the simpler non-hierarchical bootstrapping approach described above.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Addressing Missing Data}
+\label{method:missing_data}
+
+It is important to note that all practices and patients do not have data observed across all years.
+A common approach to tackle the problem of missing data
+is to assume the patterns of missing data are at random (MAR)
+and apply multiple imputations (MI).
+Noting that more than half of the patients have at least one
+measurement both before and after the intervention,
+for simplicity and computation efficiency we assume the data are missing completely at random (MCAR)
+and remove records that only have cost data before or after the intervention.
+For example, records with year 2 and year 3 (year 4) cost data present
+are utilized when estimating $\ATTestIPWDID_{3}$ ($\ATTestIPWDID_{4}$).
+This results in \SI{30}{\percent} of patients being dropped
+on average in each realization of the data.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Subgroup Analysis}
+\label{method:subgroup_ana}
+
+The \IPWDID method targets the population-level \ATT
+and does not primarily estimate heterogeneous treatment effects.
+The treatment effects within subgroups need to be evaluated separately.
+Here we simply focus on data points within each subgroup;
+the propensity score estimated over all samples is used,
+but the \IPW is re-calculated within the subgroup,
+and the \ATT is re-evaluated using the subgroup-specific \IPW.
+To save computation time all subgroup results are
+evaluated in the same bootstrap iteration as the overall result.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Patient-Level and Practice-Level Submission}
+\label{method:submissions}
+
+Here we summarize the four submissions made by the \IPWDID team over the course of the challenge.
+Submissions with \modelStyle{*} were submitted after the official challenge deadline.
+
+\subsubsection{\ipwdid}
+
+\ipwdid is the initial submission before the deadline.
+It only evaluates patient-level data,
+and uses a hierarchical bootstrapping approach for the confidence intervals.
+When results were released at ACIC 2022 the width of the confidence intervals was shown to be extremely large.
+
+\subsubsection{\ipwdidStar}
+
+\ipwdidStar is a correction of \ipwdid that maintains the original point estimates,
+while incorporating a corrected, and more straightforward, patient-level data resampling approach for the confidence intervals.
+
+\subsubsection{\ipwdidP}
+
+\ipwdidP is an extension of \ipwdid to the practice-level data, using the same methods.
+Patient-level \ATT was calculated via a sample size average across practices.
+
+\subsubsection{\ipwdidPtwo}
+
+\ipwdidPtwo is a sensitivity analysis as suggested by the organizers.
+\ipwdidPtwo uses the average of year 1 and 2 costs as the baseline cost,
+but is otherwise identical to \ipwdidP.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Results}
+\label{results}
+
+As all four submissions used similar methods,
+we will elaborate the results from the \ipwdidStar model unless stated otherwise.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Bias and Root Mean Square Error (RMSE)}
+\label{results:bias_RMSE}
+
+The bias and root mean square error (RMSE) for overall \SATT in \ipwdidStar are \num{10.0} and \num{19.4}, respectively.
+Compared to the top-performing model with a bias of \num{3.9} and RMSE of \num{11.0}, the gap is moderate.
+While the result is not optimal, it is better than \SI{75}{\percent} of other submissions.
+
+When validating the model in the absence of confounders,
+utilizing the no confounding realizations identified by the challenge organizers post-submission,
+we observe a small bias of \num{-1.7} and RMSE of \num{8.6}.
+However, the bias increases with the increment of the confounding strength.
+The average bias across all scenarios for weak and strong confounding settings are \num{7.3} and \num{14.2}, respectively.
+This indicates a weakness of our model when facing strong confounding.
+
+We observed significantly poorer results from models reporting \SATT for subgroups, especially small subgroups.
+For comparison, the bias and RMSE of \ipwdidStar for the subgroup are \num{11.1} and \num{36.5}, respectively,
+while the top-performing model had a bias of \num{3.9} and RMSE of \num{15.8}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Coverage}
+\label{results:coverage}
+
+All models except \ipwdid yield a coverage probability less than \SI{90}{\percent}.
+\ipwdid returns an average of \SI{92.5}{\percent} coverage,
+which is very close to the nominal confidence interval at \SI{90}{\percent}.
+However, this is likely a coincidence, as supported by
+the model having a \SI{100}{\percent} coverage in the absence of confounders.
+This could be due to either a coding error or a lack of understanding of the hierarchical bootstrap strategy.
+As a result, the confidence interval of \ipwdid is over-conservative and does not merit further interpretation.
+
+In the corrected version \ipwdidStar, we see that the coverage of overall \SATT is \SI{60}{\percent}.
+This is better than or equal to \SI{60}{\percent} of other submissions,
+excluding those with obvious major issues in confidence interval estimation.
+
+Given that the model suffers from moderate to strong bias,
+it is not surprising to see the coverage is below the nominal coverage,
+similar to all participants' results.
+The coverage for the overall model without confounding is
+\SI{81}{\percent}, which is close to the nominal coverage.
+However, no model with confounders and no subgroup model reaches the same level of coverage,
+especially for small subgroups and scenarios with large confounding strengths.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Patient-Level vs.\ Practice-Level}
+\label{results:patient_practice}
+
+The \ipwdidP model on practice-level data has
+behavior similar to \ipwdidStar on patient-level data,
+with a few noticeable differences.
+First, the estimates have a larger variance,
+as can be seen in the overall \SATT estimate's relatively small bias of \num{-2.4}, and large RMSE of \num{21.5}.
+Second, for \ipwdidP we observe a negative bias for scenarios when confounding is partially based on pre-intervention trends, Scenario A,
+and a positive bias when confounding is not based on pre-trends, Scenario B.
+In contrast, for \ipwdidStar on patient-level data the bias is systematically positive across the board.
+Third, the bias and RMSE from \ipwdidP is smaller for subgroup models.
+
+Finally, a significant improvement in coverage is observed.
+For example, \ipwdidP recovers the \SI{90}{\percent} confidence interval in the absence of confounders.
+When operating on data variations with weak and strong confounders,
+the model consistently yields an average coverage of
+\SI{74}{\percent} and \SI{75}{\percent} of the confidence interval, respectively.
+We conclude that the practice-level model performs much better
+for the interval estimate than the patient-level model.
+This indicates that our method did not fully utilize the granularity of the patient-level data.
+
+Compared to \ipwdidP, the \ipwdidPtwo sensitivity analysis used
+the average of year 1 and year 2 cost as the pre-intervention cost outcomes.
+We consistently observed a larger positive bias, similar RMSE, and lower coverage for most of the simulation scenarios.
+Thus, simply adding year 1 data to the pre-intervention period does not improve the \IPWDID model;
+a more advanced treatment of year 1 is required.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Discussion}
+\label{discussion}
+
+With the goal of calibrating popular and conventional methods for social science and epidemiological research,
+we have tried a few variations of the \DID estimator with \IPW.
+Massive simplifications have been applied,
+and strong assumptions were made without thorough validation,
+yet we show that \IPWDID methods are quite robust across the different simulated scenarios.
+\IPWDID returns a sufficiently good estimate and reasonable confidence interval for inference,
+when the confounding is not strong.
+In addition, the implementation of the method is relatively straightforward in comparison to novel methods.
+This enables researchers with basic statistical backgrounds to
+effectively utilize the \IPWDID method with a lower risk of implementation errors.
+Finally, we show the method ranks in the top half of the competition, despite so much simplification and restriction.
+\IPWDID beats other methods that potentially utilize the data more efficiently,
+either in constructing the response surface or by being doubly robust.
+
+We acknowledge the following limitations of the \IPWDID method as implemented,
+and outline some potential improvements.
+First, we made additional simplifying assumptions not required by the \IPWDID framework
+that could be removed with a slightly more complex analysis.
+For instance, the year 1 cost data and patients with missing data
+could be incorporated into the model to improve data usage efficiency.
+Second, the propensity scores could be better evaluated with a model other than logistic regression.
+Third, in our experiments the practice-level results appear no worse, or even better,
+than the patients-level results regarding both RMSE and coverage.
+This somewhat justifies the study design decision to focus on aggregated datasets when using \IPWDID,
+where the data abstraction is sufficient,
+instead of working on the most comprehensive dataset.
+However, this also indicates that patient-level variation has not been well captured by our model.
+A more complex model that better explores the patient-level information might be preferred.
+
+Finally, as shown by the challenge organizers, our method tends to chase noise from small subgroups.
+We suspect this is mainly because the method mechanically subsets the data and re-evaluates the result within each subset.
+A higher variance was observed when only information from the subset was used.
+For the same reason, heterogeneity was studied disjointly by putting subgroup analyses together,
+instead of tackling it simultaneously in a single model.
+Methods that more naturally handle heterogeneity in a single model may be preferred.
+Nevertheless, we would like to emphasize that subsetting data is a typical approach used in applied research.
+For this particular dataset, we would suggest not using \IPWDID on subgroups
+if effect heterogeneity is the primary study objective.
+
+While our implementation of \IPWDID may lack novelty,
+we are happy to share our results with the community as a benchmark
+by which to compare the many other excellent submissions.
+The \R code underlying this submission is available at
+\href{https://github.com/mepland/acic\_causality\_challenge\_2022}{github.com/mepland/acic\_causality\_challenge\_2022}.
+Meanwhile, we are somewhat surprised to see our approach outperform many other methods, including
+BART, targeted maximum likelihood estimation (TMLE), and DR based submissions.
+We feel it is important to highlight that a novel method may not work as expected if
+the underlying assumptions are not met,
+the method is not well-understood,
+the method is incorrectly implemented,
+or if
+the method is not suitable for the use case.
+Sufficient support needs to be provided from statisticians to applied researchers
+in other disciplines before such novel methods are adopted.
+Otherwise, conventional methods, such as \IPWDID, may be a safer, yet still performant, choice.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Acknowledgements should go at the end, before appendices and references
+
+\acks{We would like to acknowledge the support of this project from Komodo Health,
+including the necessary computational resources,
+as well as thank Mariel Finucane and Dan Thal for organizing this years challenge.}
+
+% Manual newpage inserted to improve layout of sample file - not needed in general before appendices/bibliography.
+% \newpage
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \appendix
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \section{}
+% \label{app:A}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\vskip 0.2in
+\bibliographystyle{./bib/atlasBibStyleWithTitle}
+\bibliography{./bib/bib_obs_study}
+
+\end{document}
